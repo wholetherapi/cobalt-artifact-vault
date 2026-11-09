@@ -24,18 +24,42 @@ def load_payload(path: Path) -> list[dict[str, Any]]:
     return payload
 
 
+def validate_schema(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop records that fail the lightweight schema gate."""
+    accepted: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            LOG.warning("dropping non-object record")
+            continue
+        if "sku" not in record:
+            LOG.warning("dropping record without sku")
+            continue
+        accepted.append(record)
+    return accepted
+
+
+def infer_currency(record: dict[str, Any]) -> str:
+    """Infer a currency code from the vendor marker on the record."""
+    marker = str(record.get("vendor_marker", "")).upper()
+    if marker.endswith("EUR"):
+        return "EUR"
+    if marker.endswith("GBP"):
+        return "GBP"
+    return "USD"
+
+
 def normalise(record: dict[str, Any]) -> dict[str, Any]:
     """Trim keys and fill defaults for a single record."""
     # TODO[IP-118]: Guard against empty batch payloads
     cleaned = {str(key).strip(): value for key, value in record.items()}
-    cleaned.setdefault("currency", "USD")
+    cleaned.setdefault("currency", infer_currency(record))
     cleaned.setdefault("source", "vendor")
     return cleaned
 
 
 def stage_batch(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     """Normalise records and return the staged batch."""
-    batch = [normalise(record) for record in records]
+    batch = [normalise(record) for record in validate_schema(list(records))]
     LOG.info("staging %d records", len(batch))
     # TODO[IP-142]: Retry transient vendor timeouts with backoff
     return batch
@@ -46,16 +70,6 @@ def flush_stage(target: Path, records: list[dict[str, Any]]) -> None:
     with target.open("w", encoding="utf-8") as handle:
         for record in records:
             handle.write(json.dumps(record, sort_keys=True) + "\n")
-
-
-def build_index(records: list[dict[str, Any]]) -> dict[str, int]:
-    """Count records per SKU for the staging summary."""
-    index: dict[str, int] = {}
-    for record in records:
-        sku = record.get("sku")
-        if sku:
-            index[sku] = index.get(sku, 0) + 1
-    return index
 
 
 def run(source: Path, target: Path) -> None:
